@@ -19,6 +19,7 @@ def _init_state() -> None:
         "field_map": {},
         "pipeline_ready": {},
         "show_prep": {},
+        "show_sidebar_prep_actions": {},
         "source_name": None,
     }
     for key, value in defaults.items():
@@ -32,6 +33,7 @@ def _reset_table(table_name: str) -> None:
     st.session_state["field_map"].pop(table_name, None)
     st.session_state["pipeline_ready"][table_name] = False
     st.session_state["show_prep"][table_name] = False
+    st.session_state["show_sidebar_prep_actions"][table_name] = False
 
 
 def _render_report(report: dict) -> None:
@@ -76,6 +78,7 @@ def render_data_import_page() -> None:
         for table in bundle.tables:
             st.session_state["pipeline_ready"][table] = st.session_state["pipeline_ready"].get(table, False)
             st.session_state["show_prep"][table] = st.session_state["show_prep"].get(table, False)
+            st.session_state["show_sidebar_prep_actions"][table] = st.session_state["show_sidebar_prep_actions"].get(table, False)
 
     tables = st.session_state.get("raw_tables", {})
     if not tables:
@@ -88,6 +91,20 @@ def render_data_import_page() -> None:
     selected = st.selectbox("Select a table", table_names)
     st.session_state["show_prep"].setdefault(selected, False)
     st.session_state["pipeline_ready"].setdefault(selected, False)
+    st.session_state["show_sidebar_prep_actions"].setdefault(selected, False)
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Pipeline")
+    if st.sidebar.button("▶ Run Pipeline", key=f"sidebar_run_pipeline_{selected}", use_container_width=True):
+        st.session_state["show_sidebar_prep_actions"][selected] = True
+
+    if st.session_state["show_sidebar_prep_actions"].get(selected, False):
+        if st.sidebar.button(
+            "🧹 Data Cleaning / Pre-processing",
+            key=f"sidebar_open_prep_{selected}",
+            use_container_width=True,
+        ):
+            st.session_state["show_prep"][selected] = True
 
     if st.session_state["pipeline_ready"].get(selected, False):
         st.markdown("### Pipeline status: **Pipeline Ready ✅**")
@@ -107,6 +124,7 @@ def render_data_import_page() -> None:
     )
     if start_pipeline:
         st.session_state["show_prep"][selected] = True
+        st.session_state["show_sidebar_prep_actions"][selected] = True
 
     if st.button(f"Reset prepared data for {selected}", key=f"reset_{selected}"):
         _reset_table(selected)
