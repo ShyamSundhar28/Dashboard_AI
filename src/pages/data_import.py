@@ -21,6 +21,7 @@ def _init_state() -> None:
     st.session_state.setdefault("field_map", {})
     st.session_state.setdefault("pipeline_ready", {})
     st.session_state.setdefault("pipeline_payload", {})
+    st.session_state.setdefault("prep_flow_open", {})
 
 
 def _load_upload_if_needed() -> None:
@@ -48,6 +49,7 @@ def _load_upload_if_needed() -> None:
     st.session_state["field_map"] = {}
     st.session_state["pipeline_ready"] = {}
     st.session_state["pipeline_payload"] = {}
+    st.session_state["prep_flow_open"] = {}
 
     st.success(f"Loaded **{len(bundle.tables)}** table(s).")
 
@@ -86,18 +88,6 @@ def validate_ready(df: pd.DataFrame, field_map: dict[str, str | None]) -> tuple[
             issues.append("Value column numeric conversion rate is below 80%.")
 
     return len(issues) == 0, issues
-
-
-def _render_prepare_button(table_name: str, raw_df: pd.DataFrame) -> None:
-    if st.button("🚿 Prepare / Clean Data", key=f"prepare_btn_{table_name}"):
-        cleaned, report = prepare_dataframe(raw_df)
-        st.session_state["prepared_tables"][table_name] = cleaned
-        st.session_state["prep_reports"][table_name] = report
-
-        auto_map = auto_detect_fields(cleaned)
-        st.session_state["field_map"][table_name] = auto_map
-        st.session_state["pipeline_ready"][table_name] = False
-        st.success("Data preparation completed. Review prepared preview and validation before starting pipeline.")
 
 
 def _render_report(table_name: str) -> None:
@@ -193,15 +183,15 @@ def _render_validation_and_gate(table_name: str) -> None:
 
     ready, issues = validate_ready(prepared_df, field_map)
 
-    st.markdown("### Validation")
+    st.markdown("### Step 3) ✅ Validate & Save")
     if ready:
         st.success("All validation checks passed.")
     else:
-        st.error("Validation failed. Resolve issues before starting pipeline.")
+        st.error("Validation failed. Resolve issues before saving.")
         for issue in issues:
             st.write(f"- {issue}")
 
-    if st.button("✅ Start Pipeline", key=f"start_pipeline_{table_name}", disabled=not ready):
+    if st.button("✅ Validate & Save", key=f"validate_save_{table_name}", disabled=not ready):
         st.session_state["pipeline_ready"][table_name] = True
         st.session_state["pipeline_payload"][table_name] = {
             "prepared_df": prepared_df.copy(),
@@ -235,23 +225,38 @@ def render_data_import_page() -> None:
     st.write(f"Rows: **{len(raw_df):,}** | Columns: **{len(raw_df.columns):,}**")
     st.dataframe(raw_df, use_container_width=True, height=300)
 
-    _render_prepare_button(selected, raw_df)
+    if st.button("✅ Start Pipeline (Prepare Data)", type="primary", key=f"open_prepare_flow_{selected}"):
+        st.session_state["prep_flow_open"][selected] = True
+
+    flow_open = st.session_state["prep_flow_open"].get(selected, False)
 
     has_prepared = selected in st.session_state["prepared_tables"]
     view_options = ["Raw", "Prepared"] if has_prepared else ["Raw"]
     view_mode = st.radio("View", options=view_options, horizontal=True, key=f"view_mode_{selected}")
 
-    if has_prepared:
-        _render_report(selected)
-        prepared_df = st.session_state["prepared_tables"][selected]
+    if flow_open:
+        st.markdown("### Step 1) 🚿 Auto Prepare / Clean")
+        if st.button("🚿 Auto Prepare / Clean", key=f"prepare_btn_{selected}"):
+            cleaned, report = prepare_dataframe(raw_df)
+            st.session_state["prepared_tables"][selected] = cleaned
+            st.session_state["prep_reports"][selected] = report
+            st.session_state["field_map"][selected] = auto_detect_fields(cleaned)
+            st.session_state["pipeline_ready"][selected] = False
+            st.success("Data auto-prepared. Continue with rename/map and validation.")
 
-        if view_mode == "Prepared":
-            st.subheader("Prepared Preview")
-            st.write(f"Rows: **{len(prepared_df):,}** | Columns: **{len(prepared_df.columns):,}**")
-            st.dataframe(prepared_df, use_container_width=True, height=300)
+        has_prepared = selected in st.session_state["prepared_tables"]
+        if has_prepared:
+            _render_report(selected)
+            prepared_df = st.session_state["prepared_tables"][selected]
 
-        _render_rename_editor(selected)
-        _render_field_map(selected)
-        _render_validation_and_gate(selected)
-    else:
-        st.info("Run 🚿 Prepare / Clean Data to unlock mapping, validation, and pipeline start.")
+            if view_mode == "Prepared":
+                st.subheader("Prepared Preview")
+                st.write(f"Rows: **{len(prepared_df):,}** | Columns: **{len(prepared_df.columns):,}**")
+                st.dataframe(prepared_df, use_container_width=True, height=300)
+
+            st.markdown("### Step 2) 📝 Rename / Map Columns")
+            _render_rename_editor(selected)
+            _render_field_map(selected)
+            _render_validation_and_gate(selected)
+        else:
+            st.info("Click '🚿 Auto Prepare / Clean' to generate the prepared dataset.")
