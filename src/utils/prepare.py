@@ -93,17 +93,20 @@ def infer_types(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         if non_null.empty:
             continue
 
-        date_parsed = pd.to_datetime(series, errors="coerce")
-        date_ratio = float(date_parsed.notna().mean())
-
         numeric_parsed = pd.to_numeric(series, errors="coerce")
         numeric_ratio = float(numeric_parsed.notna().mean())
 
-        if date_ratio >= 0.8:
+        date_parsed = pd.to_datetime(series, errors="coerce")
+        date_ratio = float(date_parsed.notna().mean())
+
+        col_name = str(col).lower()
+        has_date_keyword = any(keyword in col_name for keyword in _DATE_KEYWORDS)
+
+        if numeric_ratio >= 0.8 and not has_date_keyword:
+            typed[col] = numeric_parsed
+        elif date_ratio >= 0.8:
             typed[col] = date_parsed
             inferred_date_columns.append(str(col))
-        elif numeric_ratio >= 0.8:
-            typed[col] = numeric_parsed
 
     return typed, inferred_date_columns
 
