@@ -1,259 +1,200 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from typing import Any
 
 import pandas as pd
 
 
-BLANK_LIKE_STRINGS = {"", "nan", "none", "null", "nat"}
+_DATE_KEYWORDS = ("date", "time", "day", "month", "year", "timestamp")
+_LOCATION_KEYWORDS = ("location", "city", "country", "region", "state", "address", "site")
+_VALUE_KEYWORDS = ("value", "amount", "total", "weight", "qty", "quantity", "price", "cost")
 
 
-def is_blank(x: Any) -> bool:
-    if x is None:
+def _is_empty_value(value: Any) -> bool:
+    if pd.isna(value):
         return True
-    if pd.isna(x):
-        return True
-    if isinstance(x, str) and x.strip().lower() in BLANK_LIKE_STRINGS:
-        return True
-    return False
+    return str(value).strip() == ""
 
 
 def drop_empty_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    empty_cols = [col for col in df.columns if df[col].map(is_blank).all()]
-    return df.drop(columns=empty_cols), empty_cols
+    removed: list[str] = []
+    keep_cols: list[str] = []
+
+    for col in df.columns:
+        series = df[col]
+        non_empty = series.map(lambda x: not _is_empty_value(x)).any()
+        if non_empty:
+            keep_cols.append(col)
+        else:
+            removed.append(str(col))
+
+    return df[keep_cols].copy(), removed
 
 
 def drop_empty_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    mask_all_blank = df.apply(lambda row: row.map(is_blank).all(), axis=1)
-    removed = int(mask_all_blank.sum())
-    return df.loc[~mask_all_blank].copy(), removed
+    mask_non_empty = df.apply(lambda row: any(not _is_empty_value(v) for v in row), axis=1)
+    removed_count = int((~mask_non_empty).sum())
+    return df.loc[mask_non_empty].copy(), removed_count
 
 
-def normalize_col_names(cols) -> list[str]:
-    normalized = []
-    for c in cols:
-        text = "" if c is None else str(c)
-        text = re.sub(r"\s+", " ", text.strip())
-        text = re.sub(r"[^0-9a-zA-Z]+", "_", text)
-        text = text.strip("_").lower()
+def normalize_col_names(cols: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for idx, col in enumerate(cols):
+        text = str(col) if col is not None else ""
+        text = text.strip().lower()
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"[^a-z0-9]+", "_", text)
+        text = re.sub(r"_+", "_", text).strip("_")
+        if not text:
+            text = f"column_{idx + 1}"
         normalized.append(text)
     return normalized
 
 
-def enforce_unique(cols) -> list[str]:
-    seen = Counter()
-    out: list[str] = []
-    for c in cols:
-        base = c if str(c).strip() else "column"
-        seen[base] += 1
-        if seen[base] == 1:
-            out.append(base)
+def enforce_unique(cols: list[str]) -> list[str]:
+    counts: dict[str, int] = {}
+    unique_cols: list[str] = []
+
+    for col in cols:
+        base = col
+        counts[base] = counts.get(base, 0) + 1
+        if counts[base] == 1:
+            unique_cols.append(base)
         else:
-            out.append(f"{base}_{seen[base]}")
-    return out
+            unique_cols.append(f"{base}_{counts[base]}")
+
+    return unique_cols
 
 
-def detect_header_row(df: pd.DataFrame) -> int | None:
-    if df.empty:
+def detect_header_row(df_sample: pd.DataFrame) -> int | None:
+    if df_sample.empty:
         return None
 
-    scan_rows = min(len(df), 50)
-    non_blank_counts = []
-    unnamed_like_counts = []
+    max_idx = 0
+    max_count = -1
 
-    for idx in range(scan_rows):
-        row = df.iloc[idx]
-        non_blank = sum(not is_blank(v) for v in row)
-        unnamed_like = sum(
-            isinstance(v, str) and (v.strip().lower().startswith("unnamed") or v.strip() == "")
-            for v in row
-        )
-        non_blank_counts.append(non_blank)
-        unnamed_like_counts.append(unnamed_like)
+    for idx in range(len(df_sample)):
+        count = int(df_sample.iloc[idx].map(lambda x: not _is_empty_value(x)).sum())
+        if count > max_count:
+            max_count = count
+            max_idx = idx
 
-    best_idx = int(pd.Series(non_blank_counts).idxmax())
-    row0_count = non_blank_counts[0]
-    best_count = non_blank_counts[best_idx]
-    row0_unnamed_ratio = unnamed_like_counts[0] / max(1, len(df.columns))
-
-    significantly_better = best_idx != 0 and best_count >= row0_count + max(2, int(len(df.columns) * 0.1))
-    row0_poor_header = row0_unnamed_ratio >= 0.3 or row0_count <= max(1, int(len(df.columns) * 0.4))
-
-    if significantly_better or (best_idx != 0 and row0_poor_header):
-        return best_idx
-    return None
-
-
-def apply_header_row(df: pd.DataFrame, header_row_index: int) -> pd.DataFrame:
-    header = df.iloc[header_row_index].tolist()
-    out = df.iloc[header_row_index + 1 :].copy()
-    out.columns = header
-    return out.reset_index(drop=True)
-
-
-def _maybe_to_datetime(series: pd.Series) -> tuple[pd.Series, float]:
-    parsed = pd.to_datetime(series, errors="coerce")
-    ratio = float(parsed.notna().mean())
-    return parsed, ratio
-
-
-def _maybe_to_numeric(series: pd.Series) -> tuple[pd.Series, float]:
-    parsed = pd.to_numeric(series, errors="coerce")
-    ratio = float(parsed.notna().mean())
-    return parsed, ratio
+    return int(max_idx)
 
 
 def infer_types(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    out = df.copy()
-    inferred_date_cols: list[str] = []
+    typed = df.copy()
+    inferred_date_columns: list[str] = []
 
-    for col in out.columns:
-        s = out[col]
-        if s.map(is_blank).all():
+    for col in typed.columns:
+        series = typed[col]
+        non_null = series.dropna()
+        if non_null.empty:
             continue
 
-        if pd.api.types.is_datetime64_any_dtype(s):
-            inferred_date_cols.append(col)
-            continue
+        date_parsed = pd.to_datetime(series, errors="coerce")
+        date_ratio = float(date_parsed.notna().mean())
 
-        if pd.api.types.is_numeric_dtype(s):
-            continue
+        numeric_parsed = pd.to_numeric(series, errors="coerce")
+        numeric_ratio = float(numeric_parsed.notna().mean())
 
-        dt, dt_ratio = _maybe_to_datetime(s)
-        if dt_ratio >= 0.8:
-            out[col] = dt
-            inferred_date_cols.append(col)
-            continue
+        if date_ratio >= 0.8:
+            typed[col] = date_parsed
+            inferred_date_columns.append(str(col))
+        elif numeric_ratio >= 0.8:
+            typed[col] = numeric_parsed
 
-        num, num_ratio = _maybe_to_numeric(s)
-        if num_ratio >= 0.8:
-            out[col] = num
-
-    return out, inferred_date_cols
+    return typed, inferred_date_columns
 
 
 def auto_detect_fields(df: pd.DataFrame) -> dict[str, str | None]:
-    columns = list(df.columns)
+    cols = list(df.columns)
+    result: dict[str, str | None] = {"date": None, "location": None, "value": None}
 
-    def _best(candidates: list[tuple[str, float]]) -> str | None:
-        if not candidates:
-            return None
-        return sorted(candidates, key=lambda x: x[1], reverse=True)[0][0]
+    if not cols:
+        return result
 
-    date_cands = []
-    location_cands = []
-    value_cands = []
+    def _pick_by_keywords(keywords: tuple[str, ...], skip: set[str]) -> str | None:
+        for col in cols:
+            if col in skip:
+                continue
+            lower = str(col).lower()
+            if any(k in lower for k in keywords):
+                return col
+        return None
 
-    for col in columns:
-        name = str(col).lower()
-        s = df[col]
+    used: set[str] = set()
 
-        date_score = 0.0
-        if any(k in name for k in ["date", "time", "day"]):
-            date_score += 3
-        if pd.api.types.is_datetime64_any_dtype(s):
-            date_score += 4
-        else:
-            _, ratio = _maybe_to_datetime(s)
-            date_score += ratio * 2
-        date_cands.append((col, date_score))
+    date_col = _pick_by_keywords(_DATE_KEYWORDS, used)
+    if date_col is None:
+        for col in cols:
+            if col in used:
+                continue
+            parsed = pd.to_datetime(df[col], errors="coerce")
+            if parsed.notna().mean() >= 0.8:
+                date_col = col
+                break
+    if date_col is not None:
+        used.add(date_col)
+    result["date"] = date_col
 
-        loc_score = 0.0
-        if any(k in name for k in ["location", "place", "site", "branch", "school", "center", "category"]):
-            loc_score += 4
-        if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
-            nunique = s.nunique(dropna=True)
-            if 1 < nunique < max(3, len(s) * 0.7):
-                loc_score += 2
-        location_cands.append((col, loc_score))
+    value_col = _pick_by_keywords(_VALUE_KEYWORDS, used)
+    if value_col is None:
+        for col in cols:
+            if col in used:
+                continue
+            parsed = pd.to_numeric(df[col], errors="coerce")
+            if parsed.notna().mean() >= 0.8:
+                value_col = col
+                break
+    if value_col is not None:
+        used.add(value_col)
+    result["value"] = value_col
 
-        val_score = 0.0
-        if any(k in name for k in ["value", "amount", "count", "qty", "quantity", "total", "metric"]):
-            val_score += 4
-        if pd.api.types.is_numeric_dtype(s):
-            val_score += 3
-        else:
-            _, ratio = _maybe_to_numeric(s)
-            val_score += ratio * 2
-        value_cands.append((col, val_score))
+    location_col = _pick_by_keywords(_LOCATION_KEYWORDS, used)
+    if location_col is None:
+        for col in cols:
+            if col in used:
+                continue
+            if pd.api.types.is_string_dtype(df[col]) or df[col].astype(str).str.len().mean() > 0:
+                location_col = col
+                break
+    result["location"] = location_col
 
-    return {
-        "date_col": _best(date_cands),
-        "location_col": _best(location_cands),
-        "value_col": _best(value_cands),
-    }
+    return result
 
 
 def prepare_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
-    report: dict[str, Any] = {
-        "detected_header_row": None,
-        "removed_empty_columns": [],
-        "removed_empty_rows_count": 0,
-        "renamed_columns": {},
-        "inferred_date_columns": [],
-    }
-
     working = df.copy()
-    detected = detect_header_row(working)
-    if detected is not None:
-        working = apply_header_row(working, detected)
-        report["detected_header_row"] = int(detected)
 
-    working, removed_cols = drop_empty_columns(working)
-    working, removed_rows = drop_empty_rows(working)
+    header_idx = detect_header_row(working.head(min(len(working), 10)))
+    if header_idx is not None and header_idx > 0 and header_idx < len(working):
+        new_header = [str(v) if not _is_empty_value(v) else f"column_{i+1}" for i, v in enumerate(working.iloc[header_idx].tolist())]
+        working = working.iloc[header_idx + 1 :].copy().reset_index(drop=True)
+        working.columns = new_header
 
-    old_cols = [str(c) for c in working.columns]
-    normalized = normalize_col_names(old_cols)
-    unique_cols = enforce_unique(normalized)
+    original_cols = [str(c) for c in working.columns]
+    normalized_cols = normalize_col_names(original_cols)
+    unique_cols = enforce_unique(normalized_cols)
 
-    rename_map = {old: new for old, new in zip(old_cols, unique_cols) if old != new}
+    renamed_columns: dict[str, str] = {}
+    for old, new in zip(original_cols, unique_cols):
+        if old != new:
+            renamed_columns[old] = new
+
     working.columns = unique_cols
 
-    working, inferred_dates = infer_types(working)
+    working, removed_empty_columns = drop_empty_columns(working)
+    working, removed_empty_rows_count = drop_empty_rows(working)
+    working, inferred_date_columns = infer_types(working)
 
-    report["removed_empty_columns"] = removed_cols
-    report["removed_empty_rows_count"] = int(removed_rows)
-    report["renamed_columns"] = rename_map
-    report["inferred_date_columns"] = inferred_dates
+    report = {
+        "removed_empty_columns": removed_empty_columns,
+        "removed_empty_rows_count": removed_empty_rows_count,
+        "renamed_columns": renamed_columns,
+        "detected_header_row": header_idx,
+        "inferred_date_columns": inferred_date_columns,
+    }
 
-    return working.reset_index(drop=True), report
-
-
-def validate_ready(df: pd.DataFrame, field_map: dict[str, str | None]) -> tuple[bool, list[str]]:
-    issues: list[str] = []
-
-    cols = list(df.columns)
-    if any(str(c).strip() == "" for c in cols):
-        issues.append("Found empty column name(s).")
-
-    if any(str(c).lower().startswith("unnamed") for c in cols):
-        issues.append("Found columns named like 'Unnamed: ...'.")
-
-    all_null_cols = [col for col in cols if df[col].map(is_blank).all()]
-    if all_null_cols:
-        issues.append(f"All-null columns present: {', '.join(map(str, all_null_cols))}.")
-
-    if len(cols) != len(set(cols)):
-        issues.append("Column names are not unique.")
-
-    date_col = field_map.get("date_col")
-    location_col = field_map.get("location_col")
-    value_col = field_map.get("value_col")
-
-    for key, col in [("Date", date_col), ("Location", location_col), ("Value", value_col)]:
-        if not col or col not in cols:
-            issues.append(f"Mapped {key} column is missing.")
-
-    if date_col and date_col in cols:
-        parsed = pd.to_datetime(df[date_col], errors="coerce")
-        if float(parsed.notna().mean()) < 0.8:
-            issues.append("Date column parsing success is below 80%.")
-
-    if value_col and value_col in cols:
-        parsed = pd.to_numeric(df[value_col], errors="coerce")
-        if float(parsed.notna().mean()) < 0.8:
-            issues.append("Value column numeric conversion success is below 80%.")
-
-    return len(issues) == 0, issues
+    return working, report
