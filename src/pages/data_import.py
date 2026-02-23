@@ -12,6 +12,7 @@ def _init_state() -> None:
     st.session_state.setdefault("pipeline_reports", {})
     st.session_state.setdefault("field_mappings", {})
     st.session_state.setdefault("pipeline_ready_tables", set())
+    st.session_state.setdefault("column_rename_inputs", {})
 
 
 def _table_key(source_name: str | None, table_name: str) -> str:
@@ -29,6 +30,25 @@ def _render_profile(df: pd.DataFrame) -> None:
             }
         )
         st.dataframe(info, use_container_width=True)
+
+
+def _sanitize_manual_column_names(user_values: list[str], fallback_columns: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: dict[str, int] = {}
+
+    for idx, (user_value, fallback) in enumerate(zip(user_values, fallback_columns), start=1):
+        text = str(user_value).strip()
+        base = text if text else str(fallback)
+        if not base:
+            base = f"column_name_{idx}"
+
+        seen[base] = seen.get(base, 0) + 1
+        if seen[base] == 1:
+            cleaned.append(base)
+        else:
+            cleaned.append(f"{base}_{seen[base]}")
+
+    return cleaned
 
 
 def render_data_import_page() -> None:
@@ -113,7 +133,39 @@ def render_data_import_page() -> None:
             if inferred_dates:
                 st.write(f"**Detected date columns:** {', '.join(inferred_dates)}")
 
-        with st.expander("Step B: 📝 Confirm field mapping", expanded=True):
+        with st.expander("Step B: 📝 Rename columns (User Confirmation)", expanded=True):
+            st.write("Set your own column names before analytics. Use simple names that are easy for SQL/metrics.")
+
+            rename_key = f"rename_inputs::{table_key}"
+            column_labels = list(prepared_df.columns)
+            existing_inputs = st.session_state["column_rename_inputs"].get(rename_key)
+            if not existing_inputs or len(existing_inputs) != len(column_labels):
+                existing_inputs = [str(col) for col in column_labels]
+                st.session_state["column_rename_inputs"][rename_key] = existing_inputs
+
+            input_values: list[str] = []
+            for idx, col_name in enumerate(column_labels, start=1):
+                value = st.text_input(
+                    f"Column name {idx}",
+                    value=existing_inputs[idx - 1],
+                    key=f"rename_col::{table_key}::{idx}",
+                    help=f"Current column: {col_name}",
+                )
+                input_values.append(value)
+
+            apply_rename = st.button("Apply Rename", key=f"apply_rename::{table_key}")
+            if apply_rename:
+                renamed_columns = _sanitize_manual_column_names(input_values, [str(c) for c in column_labels])
+                renamed_df = prepared_df.copy()
+                renamed_df.columns = renamed_columns
+                st.session_state["prepared_tables"][table_key] = renamed_df
+                st.session_state["column_rename_inputs"][rename_key] = renamed_columns
+                st.session_state["field_mappings"][table_key] = auto_detect_fields(renamed_df)
+                st.session_state["pipeline_ready_tables"].discard(table_key)
+                st.success("Column names updated.")
+                st.rerun()
+
+        with st.expander("Step C: ✅ Validate & Save (SQL-ready)", expanded=True):
             cols = [str(c) for c in prepared_df.columns]
             mapping = st.session_state["field_mappings"].get(table_key, {"date": None, "location": None, "value": None})
 
@@ -142,7 +194,6 @@ def render_data_import_page() -> None:
                 "value": None if value_col == "<none>" else value_col,
             }
 
-        with st.expander("Step C: ✅ Validate & Save (SQL-ready)", expanded=True):
             current_map = st.session_state["field_mappings"][table_key]
             missing = [name for name, col in current_map.items() if col is None]
 
